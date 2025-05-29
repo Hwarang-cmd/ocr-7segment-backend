@@ -9,25 +9,49 @@ import cv2
 
 app = Flask(__name__)
 
-def preprocess_image(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
-    # ใช้ CLAHE เพื่อเพิ่ม contrast
+def preprocess_roi(roi):
+    gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     enhanced = clahe.apply(gray)
-
-    # ใช้ adaptive threshold (invert เพราะเลขดำบนพื้นเขียว)
     thresh = cv2.adaptiveThreshold(enhanced, 255,
                                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 15, 5)
-
-    # Morphology: ปิดรูเล็ก ๆ เพื่อเชื่อมตัวเลข 7-segment
-    kernel = np.ones((3,3), np.uint8)
+                                   cv2.THRESH_BINARY_INV, 15, 8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-    # ขยายภาพเพื่อช่วย OCR อ่านง่ายขึ้น
     resized = cv2.resize(closed, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     return resized
+
+def detect_7segment_rois(image_np):
+    """Detect ROI ที่น่าจะเป็น 7-segment display ในภาพ"""
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5,5), 0)
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # invert ถ้าพื้นหลังขาวและตัวเลขดำ
+    if np.mean(thresh) > 127:
+        thresh = cv2.bitwise_not(thresh)
+
+    # หา contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    rois = []
+    for cnt in contours:
+        x,y,w,h = cv2.boundingRect(cnt)
+
+        # กรองสัดส่วนและขนาดที่น่าจะเป็นเลข 7-seg (กว้างกว่า สูงกว่า และสัดส่วนพอเหมาะ)
+        aspect_ratio = w / float(h)
+        area = w * h
+        if area < 1000 or area > 20000:  # กรองขนาดเล็กเกินไปหรือใหญ่เกินไป
+            continue
+        if aspect_ratio < 1.5 or aspect_ratio > 5.0:  # 7-seg display มักจะกว้างกว่าสูง
+            continue
+
+        roi = image_np[y:y+h, x:x+w]
+        rois.append(roi)
+
+    # เรียง ROI จากซ้ายไปขวา (เพื่ออ่านเลขเรียงตามตำแหน่ง)
+    rois = sorted(rois, key=lambda r: cv2.boundingRect(r)[0])
+    return rois
 
 @app.route("/ocr", methods=["POST"])
 def ocr():
@@ -39,17 +63,19 @@ def ocr():
     image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image_np = np.array(image_pil)
 
-    processed_img = preprocess_image(image_np)
+    rois = detect_7segment_rois(image_np)
+    digits_all = ""
 
-    # config Tesseract: PSM 7 (single line), whitelist เลข 0-9
-    config = "--psm 7 -c tessedit_char_whitelist=0123456789"
-    text = pytesseract.image_to_string(processed_img, config=config)
-
-    digits_only = re.sub(r'\D', '', text)
+    for roi in rois:
+        processed_roi = preprocess_roi(roi)
+        config = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
+        text = pytesseract.image_to_string(processed_roi, config=config)
+        digits = re.sub(r'\D', '', text)
+        digits_all += digits
 
     return jsonify({
-        "raw": digits_only,
-        "parsed": [digits_only] if digits_only else []
+        "raw": digits_all,
+        "parsed": [digits_all] if digits_all else []
     })
 
 if __name__ == "__main__":
