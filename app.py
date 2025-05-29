@@ -2,12 +2,53 @@ from flask import Flask, request, jsonify
 from PIL import Image
 import pytesseract
 import io
-import re
 import os
 import numpy as np
 import cv2
+import re
 
 app = Flask(__name__)
+
+def preprocess_image(image):
+    # แปลงเป็น grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # เบลอเพื่อลด noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Threshold แบบ Inverse (ตัวเลขดำ พื้นขาว)
+    _, binary = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
+
+    return binary
+
+def find_segments(binary_image):
+    # หาขอบเขตวัตถุ (contours)
+    contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    digits = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        # กรองเฉพาะที่น่าจะเป็นตัวเลข (ขนาดประมาณ 7 segment)
+        if h > 20 and w > 10 and h < 150 and w < 100:
+            digits.append((x, y, w, h))
+
+    # เรียงจากซ้ายไปขวา
+    digits = sorted(digits, key=lambda x: x[0])
+    return digits
+
+def recognize_digits(image, digits):
+    result = ""
+    for (x, y, w, h) in digits:
+        roi = image[y:y+h, x:x+w]
+        roi = cv2.resize(roi, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+        config = '--psm 7 -c tessedit_char_whitelist=0123456789'
+        digit = pytesseract.image_to_string(roi, config=config)
+        result += digit.strip()
+
+    # กรองเฉพาะตัวเลข
+    result = re.sub(r'\D', '', result)
+    return result
 
 @app.route("/ocr", methods=["POST"])
 def ocr():
@@ -16,40 +57,16 @@ def ocr():
 
     image_file = request.files["image"]
     image_bytes = image_file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_np = np.array(image_pil)
 
-    # ถ้าต้องการแปลงเป็น numpy array เพื่อ preprocess เบื้องต้น
-    image_np = np.array(image)
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-
-    # (Optional) ทำ threshold หรือปรับภาพให้ง่ายต่อ OCR
-    _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-
-    # แปลงกลับเป็น PIL Image ก่อนส่งให้ pytesseract
-    processed_img = Image.fromarray(thresh)
-
-    # เรียก Tesseract OCR โดยระบุ whitelist เฉพาะตัวเลข
-    config = "--psm 6 -c tessedit_char_whitelist=0123456789"
-    text = pytesseract.image_to_string(processed_img, config=config)
-
-    # ลบตัวที่ไม่ใช่เลขออก
-    digits_only = re.sub(r'\D', '', text)
-
-    # แบ่งส่วนตามความยาวเลขที่อ่านได้
-    if len(digits_only) == 9:
-        parts = [digits_only[0:3], digits_only[3:6], digits_only[6:9]]
-    elif len(digits_only) == 8:
-        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:8]]
-    elif len(digits_only) == 7:
-        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:7]]
-    elif len(digits_only) == 6:
-        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:6]]
-    else:
-        parts = [digits_only]
+    binary = preprocess_image(image_np)
+    digits = find_segments(binary)
+    raw_digits = recognize_digits(binary, digits)
 
     return jsonify({
-        "raw": digits_only,
-        "parsed": parts
+        "raw": raw_digits,
+        "parsed": [raw_digits]  # ยังไม่แบ่งในขั้นตอนนี้
     })
 
 if __name__ == "__main__":
