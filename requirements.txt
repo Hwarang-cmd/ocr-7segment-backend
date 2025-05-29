@@ -1,7 +1,6 @@
 flask
-numpy
-opencv-python-headless
-pillow
-pytesseract
-gunicorn
 easyocr
+opencv-python-headless
+numpy
+pillow
+gunicorn
