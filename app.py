@@ -55,15 +55,20 @@ def ocr():
 
     image_file = request.files["image"]
     image_bytes = image_file.read()
-    image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    image_np = np.array(image_pil)
 
+    try:
+        image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        return jsonify({"error": f"Invalid image file: {str(e)}"}), 400
+
+    image_np = np.array(image_pil)
     processed_img = preprocess_image(image_np)
 
     config = "--psm 6 -c tessedit_char_whitelist=0123456789"
     text = pytesseract.image_to_string(processed_img, config=config)
 
     digits_only = re.sub(r'\D', '', text)
+
     parsed = parse_digits(digits_only)
 
     return jsonify({
