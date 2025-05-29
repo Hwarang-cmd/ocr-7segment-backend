@@ -9,21 +9,28 @@ import cv2
 
 app = Flask(__name__)
 
-def preprocess_line(image, y_start_ratio, y_end_ratio):
-    h, w = image.shape[:2]
-    y1 = int(h * y_start_ratio)
-    y2 = int(h * y_end_ratio)
-    line_img = image[y1:y2, :]
+def preprocess_image(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    gray = cv2.cvtColor(line_img, cv2.COLOR_RGB2GRAY)
-    _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    
-    # เพิ่มความคมชัดและขยายภาพ
-    kernel = np.ones((2,2), np.uint8)
-    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    enlarged = cv2.resize(cleaned, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-    
-    return enlarged
+    # เน้น contrast และลด noise
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # Invert ถ้าพื้นหลังสว่างกว่าตัวเลข
+    mean_val = np.mean(enhanced)
+    if mean_val > 127:
+        enhanced = cv2.bitwise_not(enhanced)
+
+    # Thresholding เพื่อแยกตัวเลข
+    _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Morphological closing เพื่อเชื่อม segment ที่ขาด
+    kernel = np.ones((2, 2), np.uint8)
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    # Resize ให้ใหญ่ขึ้นเพื่อช่วย OCR
+    resized = cv2.resize(closed, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    return resized
 
 @app.route("/ocr", methods=["POST"])
 def ocr():
@@ -32,29 +39,36 @@ def ocr():
 
     image_file = request.files["image"]
     image_bytes = image_file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    image_np = np.array(image)
+    image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_np = np.array(image_pil)
 
-    # แยกเป็น 3 โซน: บรรทัดบน กลาง ล่าง
-    lines = [
-        preprocess_line(image_np, 0.10, 0.33),
-        preprocess_line(image_np, 0.34, 0.66),
-        preprocess_line(image_np, 0.67, 0.95)
-    ]
+    processed_img = preprocess_image(image_np)
 
-    config = "--psm 7 -c tessedit_char_whitelist=0123456789"
-    parsed = []
-    raw_concat = ""
+    config = "--psm 6 -c tessedit_char_whitelist=0123456789"
+    text = pytesseract.image_to_string(processed_img, config=config)
 
-    for i, line in enumerate(lines):
-        text = pytesseract.image_to_string(line, config=config)
-        digits = re.sub(r'\D', '', text)
-        parsed.append(digits)
-        raw_concat += digits
+    digits_only = re.sub(r'\D', '', text)
+
+    # ตรรกะการแบ่ง SYS, DIA, PULSE
+    parts = []
+    if len(digits_only) == 9:
+        parts = [digits_only[0:3], digits_only[3:6], digits_only[6:9]]
+    elif len(digits_only) == 8:
+        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:8]]
+    elif len(digits_only) == 7:
+        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:7]]
+    elif len(digits_only) == 6:
+        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:6]]
+    elif len(digits_only) == 5:
+        parts = [digits_only[0:3], digits_only[3:5], '']
+    elif len(digits_only) == 4:
+        parts = [digits_only[0:3], digits_only[3:4], '']
+    else:
+        parts = [digits_only]
 
     return jsonify({
-        "raw": raw_concat,
-        "parsed": parsed
+        "raw": digits_only,
+        "parsed": parts
     })
 
 if __name__ == "__main__":
