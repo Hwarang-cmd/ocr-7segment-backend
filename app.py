@@ -1,32 +1,13 @@
 from flask import Flask, request, jsonify
-import cv2
-import numpy as np
 from PIL import Image
 import pytesseract
 import io
 import re
 import os
+import numpy as np
+import cv2
 
 app = Flask(__name__)
-
-def preprocess_image(image_cv):
-    h, w = image_cv.shape[:2]
-    x1, y1 = int(w * 0.25), int(h * 0.15)
-    x2, y2 = int(w * 0.75), int(h * 0.85)
-    cropped = image_cv[y1:y2, x1:x2]
-
-    gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 11, 2)
-
-    kernel = np.ones((2,2), np.uint8)
-    processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-    resized = cv2.resize(processed, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-
-    cv2.imwrite("processed.png", resized)  # debug บันทึกภาพ
-
-    return resized
 
 @app.route("/ocr", methods=["POST"])
 def ocr():
@@ -36,18 +17,25 @@ def ocr():
     image_file = request.files["image"]
     image_bytes = image_file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    # ถ้าต้องการแปลงเป็น numpy array เพื่อ preprocess เบื้องต้น
     image_np = np.array(image)
-    image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
 
-    processed = preprocess_image(image_cv)
+    # (Optional) ทำ threshold หรือปรับภาพให้ง่ายต่อ OCR
+    _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
 
+    # แปลงกลับเป็น PIL Image ก่อนส่งให้ pytesseract
+    processed_img = Image.fromarray(thresh)
+
+    # เรียก Tesseract OCR โดยระบุ whitelist เฉพาะตัวเลข
     config = "--psm 6 -c tessedit_char_whitelist=0123456789"
-    text = pytesseract.image_to_string(processed, config=config)
+    text = pytesseract.image_to_string(processed_img, config=config)
 
-    print("OCR raw text:", text)  # debug log
-
+    # ลบตัวที่ไม่ใช่เลขออก
     digits_only = re.sub(r'\D', '', text)
 
+    # แบ่งส่วนตามความยาวเลขที่อ่านได้
     if len(digits_only) == 9:
         parts = [digits_only[0:3], digits_only[3:6], digits_only[6:9]]
     elif len(digits_only) == 8:
@@ -63,7 +51,6 @@ def ocr():
         "raw": digits_only,
         "parsed": parts
     })
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
