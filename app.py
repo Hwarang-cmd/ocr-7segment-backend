@@ -16,12 +16,16 @@ def preprocess_image(image_cv):
     cropped = image_cv[y1:y2, x1:x2]
 
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 11, 2)
 
     kernel = np.ones((2,2), np.uint8)
     processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
     resized = cv2.resize(processed, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+    cv2.imwrite("processed.png", resized)  # debug บันทึกภาพ
+
     return resized
 
 @app.route("/ocr", methods=["POST"])
@@ -37,8 +41,11 @@ def ocr():
 
     processed = preprocess_image(image_cv)
 
-    config = "--psm 7 -c tessedit_char_whitelist=0123456789"
+    config = "--psm 6 -c tessedit_char_whitelist=0123456789"
     text = pytesseract.image_to_string(processed, config=config)
+
+    print("OCR raw text:", text)  # debug log
+
     digits_only = re.sub(r'\D', '', text)
 
     if len(digits_only) == 9:
@@ -56,6 +63,7 @@ def ocr():
         "raw": digits_only,
         "parsed": parts
     })
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
