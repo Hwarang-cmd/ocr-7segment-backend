@@ -1,59 +1,55 @@
 from flask import Flask, request, jsonify
 from PIL import Image
-import easyocr
+import pytesseract
 import io
-import numpy as np
-import cv2
 import re
 import os
-import requests
+import numpy as np
+import cv2
 
 app = Flask(__name__)
-reader = easyocr.Reader(['en'], gpu=False)  # ตั้งค่า gpu=True ถ้ามี GPU
-
-def preprocess_image(image_np):
-    # แปลงเป็น grayscale
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-
-    # ปรับ contrast ด้วย CLAHE
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # Threshold แบบ Otsu
-    _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Invert ถ้าพื้นหลังสว่าง (ให้ตัวเลขเป็นขาว)
-    if np.mean(thresh) > 127:
-        thresh = cv2.bitwise_not(thresh)
-
-    # ขยายภาพ (resize) เพื่อช่วย OCR
-    resized = cv2.resize(thresh, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-
-    return resized
 
 @app.route("/ocr", methods=["POST"])
 def ocr():
-    # รับไฟล์ภาพ
     if 'image' not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
 
-    image_file = request.files['image']
+    image_file = request.files["image"]
     image_bytes = image_file.read()
-    image_pil = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    image_np = np.array(image_pil)
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    # preprocess
-    proc_img = preprocess_image(image_np)
+    # ถ้าต้องการแปลงเป็น numpy array เพื่อ preprocess เบื้องต้น
+    image_np = np.array(image)
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
 
-    # OCR ด้วย EasyOCR
-    result = reader.readtext(proc_img)
+    # (Optional) ทำ threshold หรือปรับภาพให้ง่ายต่อ OCR
+    _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
 
-    # รวมเฉพาะตัวเลขที่ detect ได้
-    digits = ''.join([res[1] for res in result if re.fullmatch(r'\d+', res[1])])
+    # แปลงกลับเป็น PIL Image ก่อนส่งให้ pytesseract
+    processed_img = Image.fromarray(thresh)
+
+    # เรียก Tesseract OCR โดยระบุ whitelist เฉพาะตัวเลข
+    config = "--psm 6 -c tessedit_char_whitelist=0123456789"
+    text = pytesseract.image_to_string(processed_img, config=config)
+
+    # ลบตัวที่ไม่ใช่เลขออก
+    digits_only = re.sub(r'\D', '', text)
+
+    # แบ่งส่วนตามความยาวเลขที่อ่านได้
+    if len(digits_only) == 9:
+        parts = [digits_only[0:3], digits_only[3:6], digits_only[6:9]]
+    elif len(digits_only) == 8:
+        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:8]]
+    elif len(digits_only) == 7:
+        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:7]]
+    elif len(digits_only) == 6:
+        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:6]]
+    else:
+        parts = [digits_only]
 
     return jsonify({
-        "raw": digits,
-        "parsed": digits  # ยังไม่แยกบรรทัดตามที่ต้องการ
+        "raw": digits_only,
+        "parsed": parts
     })
 
 if __name__ == "__main__":
