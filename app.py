@@ -13,45 +13,63 @@ def preprocess_roi(roi):
     gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     enhanced = clahe.apply(gray)
+    # Threshold แบบ adaptive และ invert เพราะเลขเป็นสีดำบนพื้นสีเขียวสว่าง
     thresh = cv2.adaptiveThreshold(enhanced, 255,
-                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.ADAPTIVE_THRESH_MEAN_C,
                                    cv2.THRESH_BINARY_INV, 15, 8)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
     resized = cv2.resize(closed, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     return resized
 
+def mask_green_background(image_np):
+    # แปลงเป็น HSV เพื่อแยกสีเขียว
+    hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
+    lower_green = np.array([35, 40, 40])
+    upper_green = np.array([90, 255, 255])
+    mask = cv2.inRange(hsv, lower_green, upper_green)
+    # invert mask เพื่อให้ตัวเลขดำเป็นขาวใน mask
+    mask_inv = cv2.bitwise_not(mask)
+    return mask_inv
+
 def detect_7segment_rois(image_np):
-    """Detect ROI ที่น่าจะเป็น 7-segment display ในภาพ"""
+    # ลบพื้นหลังสีเขียวออกโดย mask
+    mask_inv = mask_green_background(image_np)
+    
+    # เอา mask_inv มา apply กับ grayscale เพื่อแยกเลขออกจากพื้นหลัง
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5,5), 0)
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # invert ถ้าพื้นหลังขาวและตัวเลขดำ
-    if np.mean(thresh) > 127:
-        thresh = cv2.bitwise_not(thresh)
-
-    # หา contours
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
+    fg = cv2.bitwise_and(gray, gray, mask=mask_inv)
+    
+    # ทำ threshold เพื่อหา contour ตัวเลข
+    _, thresh = cv2.threshold(fg, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # morphology ปิดรู
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
     rois = []
     for cnt in contours:
         x,y,w,h = cv2.boundingRect(cnt)
-
-        # กรองสัดส่วนและขนาดที่น่าจะเป็นเลข 7-seg (กว้างกว่า สูงกว่า และสัดส่วนพอเหมาะ)
         aspect_ratio = w / float(h)
         area = w * h
-        if area < 1000 or area > 20000:  # กรองขนาดเล็กเกินไปหรือใหญ่เกินไป
+        
+        # ปรับ filter ตามลักษณะ 7 segment ในภาพนี้
+        if area < 500 or area > 20000:
             continue
-        if aspect_ratio < 1.5 or aspect_ratio > 5.0:  # 7-seg display มักจะกว้างกว่าสูง
+        if aspect_ratio < 1.5 or aspect_ratio > 5.5:
+            continue
+        if h < 20 or h > 80:
             continue
 
         roi = image_np[y:y+h, x:x+w]
-        rois.append(roi)
-
-    # เรียง ROI จากซ้ายไปขวา (เพื่ออ่านเลขเรียงตามตำแหน่ง)
-    rois = sorted(rois, key=lambda r: cv2.boundingRect(r)[0])
-    return rois
+        rois.append((x, roi))
+    
+    # เรียงจากซ้ายไปขวา
+    rois = sorted(rois, key=lambda x: x[0])
+    rois_only = [r[1] for r in rois]
+    return rois_only
 
 @app.route("/ocr", methods=["POST"])
 def ocr():
