@@ -9,6 +9,22 @@ import cv2
 
 app = Flask(__name__)
 
+def preprocess_line(image, y_start_ratio, y_end_ratio):
+    h, w = image.shape[:2]
+    y1 = int(h * y_start_ratio)
+    y2 = int(h * y_end_ratio)
+    line_img = image[y1:y2, :]
+
+    gray = cv2.cvtColor(line_img, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # เพิ่มความคมชัดและขยายภาพ
+    kernel = np.ones((2,2), np.uint8)
+    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    enlarged = cv2.resize(cleaned, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    
+    return enlarged
+
 @app.route("/ocr", methods=["POST"])
 def ocr():
     if 'image' not in request.files:
@@ -17,39 +33,28 @@ def ocr():
     image_file = request.files["image"]
     image_bytes = image_file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-    # ถ้าต้องการแปลงเป็น numpy array เพื่อ preprocess เบื้องต้น
     image_np = np.array(image)
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
 
-    # (Optional) ทำ threshold หรือปรับภาพให้ง่ายต่อ OCR
-    _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # แยกเป็น 3 โซน: บรรทัดบน กลาง ล่าง
+    lines = [
+        preprocess_line(image_np, 0.10, 0.33),
+        preprocess_line(image_np, 0.34, 0.66),
+        preprocess_line(image_np, 0.67, 0.95)
+    ]
 
-    # แปลงกลับเป็น PIL Image ก่อนส่งให้ pytesseract
-    processed_img = Image.fromarray(thresh)
+    config = "--psm 7 -c tessedit_char_whitelist=0123456789"
+    parsed = []
+    raw_concat = ""
 
-    # เรียก Tesseract OCR โดยระบุ whitelist เฉพาะตัวเลข
-    config = "--psm 6 -c tessedit_char_whitelist=0123456789"
-    text = pytesseract.image_to_string(processed_img, config=config)
-
-    # ลบตัวที่ไม่ใช่เลขออก
-    digits_only = re.sub(r'\D', '', text)
-
-    # แบ่งส่วนตามความยาวเลขที่อ่านได้
-    if len(digits_only) == 9:
-        parts = [digits_only[0:3], digits_only[3:6], digits_only[6:9]]
-    elif len(digits_only) == 8:
-        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:8]]
-    elif len(digits_only) == 7:
-        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:7]]
-    elif len(digits_only) == 6:
-        parts = [digits_only[0:3], digits_only[3:5], digits_only[5:6]]
-    else:
-        parts = [digits_only]
+    for i, line in enumerate(lines):
+        text = pytesseract.image_to_string(line, config=config)
+        digits = re.sub(r'\D', '', text)
+        parsed.append(digits)
+        raw_concat += digits
 
     return jsonify({
-        "raw": digits_only,
-        "parsed": parts
+        "raw": raw_concat,
+        "parsed": parsed
     })
 
 if __name__ == "__main__":
